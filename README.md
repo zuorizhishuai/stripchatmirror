@@ -1,0 +1,259 @@
+# StripchatMirror
+
+[简体中文](README.md) | [English](README.en.md)
+
+基于 Cloudflare Workers 的反向代理示例，用于将 stripchat.com 及其关联资源通过单一入口进行转发与响应重写。本仓库只保留核心代理能力，不包含管理后台、负载均衡等附加功能。
+
+---
+
+## 目录
+
+- [项目概述](#项目概述)
+- [核心能力](#核心能力)
+- [架构与请求流程](#架构与请求流程)
+- [仓库结构](#仓库结构)
+- [快速开始（Cloudflare / Vercel）](#快速开始)
+- [配置说明](#配置说明)
+- [运行与运维建议](#运行与运维建议)
+- [故障排查](#故障排查)
+- [安全与合规](#安全与合规)
+- [贡献指南](#贡献指南)
+- [许可证](#许可证)
+- [免责声明](#免责声明)
+
+---
+
+## 项目概述
+
+该 Cloudflare Worker 实现了一个“受控目标域名”的反向代理，主要目标是：
+
+1. 代理页面与静态资源请求。
+2. 处理跨域访问与预检请求（CORS）。
+3. 对文本响应中的域名与协议相关 URL 进行重写。
+4. 去除部分安全限制头，以提升代理场景下的兼容性。
+5. 处理 WebSocket 升级与常见重定向场景。
+
+不在当前范围内的能力：
+
+1. 完整的生产级鉴权与访问控制。
+2. 高可靠审计日志与可观测性体系。
+3. 多环境配置（dev/stage/prod）与 CI/CD 工作流。
+
+---
+
+## 核心能力
+
+- 反向代理目标站点与关联域名资源。
+- 自动处理 OPTIONS 预检请求。
+- 自动跟随和二次处理部分 3xx 重定向。
+- 支持 HTML/CSS/JS/JSON 文本内容重写。
+- 支持图片、视频、字体等二进制流直通。
+- 处理 WebSocket 升级请求并转发至上游。
+- 调整 Set-Cookie 属性以提高代理环境可用性。
+
+---
+
+## 架构与请求流程
+
+高层流程如下：
+
+1. 客户端请求进入 Cloudflare Worker。
+2. Worker 根据路径与请求头做分流：
+   - OPTIONS：直接返回 CORS 预检响应。
+   - /\_csp 或 csp-report：返回 204。
+   - /cdn-cgi/\*：透传给目标站点，用于 Cloudflare Bot 挑战回调（不跟随重定向，保留原始状态码与 Set-Cookie）。
+   - Upgrade: websocket：走 WebSocket 转发逻辑。
+   - 其他请求：进入 HTTP 代理链路。
+3. Worker 构建上游请求并发起 fetch。
+4. 对响应执行统一处理：
+   - 过滤部分安全响应头。
+   - 注入 CORS 响应头。
+   - 规范化 Set-Cookie。
+   - 对文本内容进行域名/协议重写。
+5. 将处理后的响应返回客户端。
+
+---
+
+## 仓库结构
+
+```text
+.
+├── api/
+│   └── index.js       # Vercel Edge Function 入口
+├── LICENSE
+├── README.md
+├── README.en.md
+├── package.json
+├── vercel.json
+└── worker.js          # Cloudflare Workers 入口
+```
+
+---
+
+## 快速开始
+
+### 前置条件
+
+1. 已注册 Cloudflare 账号。
+2. 可访问 Cloudflare Workers。
+3. （可选）已在 Cloudflare 托管的自定义域名。
+
+### 方式一：控制台快速部署
+
+1. 登录 Cloudflare 控制台。
+2. 进入 Workers & Pages。
+3. 创建新的 Worker。
+4. 用仓库中的 worker.js 覆盖默认代码并保存。
+5. 点击 Deploy。
+6. 通过 \*.workers.dev 或绑定域名访问。
+
+### 方式三：Vercel 部署
+
+#### 前置条件
+
+1. 已注册 [Vercel](https://vercel.com) 账号。
+2. 已安装 Node.js（16+）。
+
+#### 方式 A：通过 Vercel 控制台（推荐）
+
+1. 将本仓库 Fork 或导入到你的 GitHub/GitLab/Bitbucket 账号。
+2. 登录 Vercel 控制台，点击 **Add New → Project**，选择该仓库。
+3. 框架预设选 **Other**，其他保持默认，点击 **Deploy**。
+4. 部署完成后通过分配的 `*.vercel.app` 域名或自定义域名访问。
+
+> 每次推送到主分支，Vercel 会自动触发重新部署。
+
+#### 方式 B：Vercel CLI 部署
+
+```bash
+npm install -g vercel
+vercel login
+vercel --prod
+```
+
+#### 本地调试
+
+```bash
+npm install
+npm run dev
+# 等同于 vercel dev，在 http://localhost:3000 启动本地预览
+```
+
+#### Vercel 与 Cloudflare Workers 的差异说明
+
+| 能力 | Cloudflare Workers | Vercel Edge Function |
+|---|---|---|
+| 运行时 | V8 isolate | V8 isolate（Edge Runtime） |
+| WebSocket 双向代理 | ✅ 原生支持 | ⚠️ 不支持双向 WS，仅透传升级头 |
+| 免费额度 | 10 万次/天 | 100 万次/月 |
+| 冷启动 | 极低（~1ms） | 极低（~5ms） |
+| 全球节点 | ~300 个 | ~100 个 |
+
+> 如需完整 WebSocket 支持，建议使用 Cloudflare Workers（`worker.js`）。
+
+---
+
+### 方式二：Wrangler CLI 部署
+
+```bash
+npm install -g wrangler
+wrangler login
+```
+
+创建 wrangler.toml（示例）：
+
+```toml
+name = "stripchat-mirror"
+main = "worker.js"
+compatibility_date = "2026-04-06"
+```
+
+执行部署：
+
+```bash
+wrangler deploy
+```
+
+本地调试（远端运行环境）：
+
+```bash
+wrangler dev --remote
+```
+
+---
+
+## 配置说明
+
+主要配置位于 worker.js 顶部常量：
+
+- TARGET_DOMAIN：目标主域。
+- TARGET_URL：目标主 URL。
+- PROXY_DOMAINS：需要在文本响应中重写的关联域名列表。
+
+建议按以下原则维护 PROXY_DOMAINS：
+
+1. 将实际出现的资源域名、API 域名、WebSocket 域名全部纳入。
+2. 新增域名后做一次端到端回归（首页、静态资源、实时连接）。
+3. 避免过度泛化匹配，减少误重写风险。
+
+---
+
+## 运行与运维建议
+
+1. 在 Cloudflare 控制台开启 Worker 日志与告警。
+2. 根据流量规模配置速率限制，防止被滥用。
+3. 对静态资源引入缓存策略（可结合 Cache API 或平台规则）。
+4. 对公开实例增加访问控制（IP 白名单、Token 或上游网关）。
+5. 定期验证上游域名与脚本策略变化，避免代理逻辑过期。
+
+---
+
+## 故障排查
+
+| 现象                         | 常见原因                         | 排查建议                                   |
+| ---------------------------- | -------------------------------- | ------------------------------------------ |
+| 页面可打开但部分资源加载失败 | 资源域名未覆盖                   | 检查网络面板失败域名并补充到 PROXY_DOMAINS |
+| 实时功能异常                 | WebSocket 目标未正确转发         | 检查 Upgrade 请求与目标 ws/wss 地址        |
+| 登录态不稳定                 | Cookie 属性与代理域不兼容        | 检查响应中的 Set-Cookie 重写结果           |
+| 页面脚本报错                 | 上游脚本策略变化或资源重写不完整 | 对比上游原始响应并补齐重写规则             |
+| 访问出现 403/429             | 上游风控或请求特征触发限制       | 降低请求频率，检查请求头与来源策略         |
+
+---
+
+## 安全与合规
+
+1. 请确保使用场景符合当地法律法规与平台条款。
+2. 该项目默认不提供匿名性、隐私合规与审计能力。
+3. 不建议将开放代理直接暴露在公网。
+4. 若用于生产环境，请补充鉴权、限流、日志脱敏与监控体系。
+
+---
+
+## 贡献指南
+
+欢迎通过 Issue 或 Pull Request 提交改进。
+
+建议贡献流程：
+
+1. Fork 仓库并创建特性分支。
+2. 修改代码并完成本地验证。
+3. 提交清晰的变更说明与复现步骤。
+4. 发起 Pull Request。
+
+推荐提交内容包含：
+
+- 变更动机与影响范围。
+- 关键逻辑说明。
+- 兼容性与回滚方案（如适用）。
+
+---
+
+## 开源许可证
+
+本项目基于 [GNU 通用公共许可证 v3.0](https://www.gnu.org/licenses/old-licenses/gpl-3.0.html) 发布。
+
+---
+
+## 免责声明
+
+本项目仅用于技术研究与学习交流。使用者需自行承担部署、运维与合规风险。
